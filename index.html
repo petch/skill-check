@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ichor Machine (Portrait Dendy Final)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #04040a;
+      color: #f5f5f5;
+      font-family: system-ui, sans-serif;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-user-select: none;
+      user-select: none;
+      touch-action: manipulation;
+    }
+
+    #wrapper {
+      text-align: center;
+      width: 100%;
+      max-width: 480px;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+
+    canvas {
+      background: #04040a;
+      border-radius: 12px;
+      box-shadow: 0 0 30px rgba(0, 0, 0, 0.9);
+      width: 100%;
+      max-width: 360px;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+
+    #controls {
+      margin-top: 10px;
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      font-size: 18px;
+      padding: 10px 20px;
+      border-radius: 999px;
+      border: none;
+      outline: none;
+      cursor: pointer;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      box-shadow: 0 0 18px rgba(0, 0, 0, 0.7);
+    }
+
+    #fillBtn {
+      background: linear-gradient(135deg, #ffec72, #ffb347); /* yellow/orange */
+      color: #201500;
+    }
+
+    #skillBtn {
+      background: linear-gradient(135deg, #7bffb2, #3fd1a2); /* green/teal */
+      color: #00150c;
+    }
+
+    #restartBtn {
+      background: linear-gradient(135deg, #ff7bcb, #d43b87); /* pink/magenta */
+      color: #fff0ff;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+<div id="wrapper">
+  <!-- Portrait canvas -->
+  <canvas id="game" width="360" height="640"></canvas>
+
+  <!-- Controls -->
+  <div id="controls">
+    <button id="fillBtn">Fill</button>
+    <button id="skillBtn">Skill</button>
+    <button id="restartBtn">Restart</button>
+  </div>
+</div>
+
+<script>
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  const fillBtn = document.getElementById("fillBtn");
+  const skillBtn = document.getElementById("skillBtn");
+  const restartBtn = document.getElementById("restartBtn");
+
+  let lastTime = 0;
+  let isFilling = false;
+
+  // Ichor machine state
+  const machine = {
+    ichor: 0,
+    maxIchor: 100,
+    baseFillRate: 4.5 // % per second while holding Fill (4x slower than 18)
+  };
+
+  // Skill check system (horizontal bar at bottom)
+  let skillCheckActive = false;
+  let timeToNextSkillCheck = randomRange(2.5, 5.5); // seconds
+
+  const skillCheck = {
+    width: 260,
+    height: 18,
+    zoneStart: 0.42,   // 42% along the bar
+    zoneWidth: 0.16,   // 16% wide
+    markerPos: 0.0,    // 0..1 along bar
+    markerSpeed: 0.9 * 0.75,  // 75% of previous speed
+    direction: 1,
+    resolved: false
+  };
+
+  // Game state (no timer)
+  let gameState = "playing"; // "playing" | "win"
+  let winSoundPlayed = false;
+
+  // ---- Web Audio setup ----
+  let audioCtx = null;
+  function ensureAudioCtx() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume();
+    }
+    return audioCtx;
+  }
+
+  // Alarm sound (longer, descending "waaah")
+  function playAlarm() {
+    const ctxA = ensureAudioCtx();
+    if (!ctxA) return;
+
+    const osc = ctxA.createOscillator();
+    const gain = ctxA.createGain();
+
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(800, ctxA.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(260, ctxA.currentTime + 0.3);
+
+    gain.gain.setValueAtTime(0.22, ctxA.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctxA.currentTime + 0.35);
+
+    osc.connect(gain);
+    gain.connect(ctxA.destination);
+
+    osc.start();
+    osc.stop(ctxA.currentTime + 0.4);
+  }
+
+  // Popup sound when skill check appears (small "boop")
+  function playPopup() {
+    const ctxA = ensureAudioCtx();
+    if (!ctxA) return;
+
+    const osc = ctxA.createOscillator();
+    const gain = ctxA.createGain();
+
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(420, ctxA.currentTime);
+    osc.frequency.linearRampToValueAtTime(620, ctxA.currentTime + 0.12);
+
+    gain.gain.setValueAtTime(0.16, ctxA.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctxA.currentTime + 0.14);
+
+    osc.connect(gain);
+    gain.connect(ctxA.destination);
+
+    osc.start();
+    osc.stop(ctxA.currentTime + 0.16);
+  }
+
+  // Win sound when machine completes
+  function playWin() {
+    const ctxA = ensureAudioCtx();
+    if (!ctxA) return;
+
+    const osc1 = ctxA.createOscillator();
+    const osc2 = ctxA.createOscillator();
+    const gain = ctxA.createGain();
+
+    osc1.type = "square";
+    osc2.type = "square";
+
+    // simple two-note arpeggio
+    osc1.frequency.setValueAtTime(660, ctxA.currentTime);
+    osc1.frequency.setValueAtTime(880, ctxA.currentTime + 0.12);
+
+    osc2.frequency.setValueAtTime(990, ctxA.currentTime);
+    osc2.frequency.setValueAtTime(1320, ctxA.currentTime + 0.12);
+
+    gain.gain.setValueAtTime(0.15, ctxA.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctxA.currentTime + 0.4);
+
+    osc1.connect(gain);
+    osc2.connect(gain);
+    gain.connect(ctxA.destination);
+
+    osc1.start();
+    osc2.start();
+    osc1.stop(ctxA.currentTime + 0.4);
+    osc2.stop(ctxA.currentTime + 0.4);
+  }
+
+  // Thick liquid flow while filling (looped noise)
+  let fillSource = null;
+  let fillGain = null;
+  function startFillSound() {
+    const ctxA = ensureAudioCtx();
+    if (!ctxA) return;
+    if (fillSource) return; // already playing
+
+    const bufferSize = ctxA.sampleRate; // 1 sec
+    const buffer = ctxA.createBuffer(1, bufferSize, ctxA.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      // soft noisy rumble
+      data[i] = (Math.random() * 2 - 1) * 0.6;
+    }
+
+    const source = ctxA.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+
+    const filter = ctxA.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.setValueAtTime(400, ctxA.currentTime);
+    filter.Q.setValueAtTime(0.7, ctxA.currentTime);
+
+    const gain = ctxA.createGain();
+    gain.gain.setValueAtTime(0.08, ctxA.currentTime);
+
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctxA.destination);
+
+    source.start();
+
+    fillSource = source;
+    fillGain = gain;
+  }
+
+  function stopFillSound() {
+    if (!fillSource || !fillGain || !audioCtx) return;
+    const ctxA = audioCtx;
+    fillGain.gain.cancelScheduledValues(ctxA.currentTime);
+    fillGain.gain.setValueAtTime(fillGain.gain.value, ctxA.currentTime);
+    fillGain.gain.exponentialRampToValueAtTime(0.001, ctxA.currentTime + 0.15);
+    fillSource.stop(ctxA.currentTime + 0.18);
+    fillSource = null;
+    fillGain = null;
+  }
+
+  // ---- Helpers & game logic ----
+
+  function randomRange(min, max) {
+    return min + Math.random() * (max - min);
+  }
+
+  function resetGame() {
+    machine.ichor = 0;
+    gameState = "playing";
+    winSoundPlayed = false;
+    skillCheckActive = false;
+    timeToNextSkillCheck = randomRange(2.5, 5.5);
+    skillCheck.markerPos = 0;
+    skillCheck.direction = 1;
+    skillCheck.resolved = false;
+    restartBtn.style.display = "none";
+    stopFillSound();
+  }
+
+  // --- Controls (mouse + touch) ---
+
+  function fillStart(e) {
+    e.preventDefault();
+    if (gameState !== "playing") return;
+    isFilling = true;
+    startFillSound();
+  }
+
+  function fillEnd(e) {
+    if (e) e.preventDefault();
+    isFilling = false;
+    stopFillSound();
+  }
+
+  function skillPress(e) {
+    e.preventDefault();
+    if (gameState !== "playing") return;
+    if (skillCheckActive && !skillCheck.resolved) {
+      resolveSkillCheck();
+    }
+  }
+
+  function restartPress(e) {
+    e.preventDefault();
+    resetGame();
+  }
+
+  // Fill button events
+  fillBtn.addEventListener("mousedown", fillStart);
+  fillBtn.addEventListener("mouseup", fillEnd);
+  fillBtn.addEventListener("mouseleave", fillEnd);
+
+  fillBtn.addEventListener("touchstart", fillStart, { passive: false });
+  fillBtn.addEventListener("touchend", fillEnd);
+  fillBtn.addEventListener("touchcancel", fillEnd);
+
+  // Skill button events
+  skillBtn.addEventListener("mousedown", skillPress);
+  skillBtn.addEventListener("touchstart", skillPress, { passive: false });
+
+  // Restart button events
+  restartBtn.addEventListener("mousedown", restartPress);
+  restartBtn.addEventListener("touchstart", restartPress, { passive: false });
+
+  function resolveSkillCheck() {
+    const zoneCenter = skillCheck.zoneStart + skillCheck.zoneWidth / 2;
+    const zoneRadius = skillCheck.zoneWidth / 2;
+    const diff = Math.abs(skillCheck.markerPos - zoneCenter);
+
+    const perfectThreshold = zoneRadius * 0.5; // inner area
+    const okayThreshold = zoneRadius;          // full green area
+
+    let result = "miss";
+
+    if (diff <= perfectThreshold) {
+      result = "perfect";
+    } else if (diff <= okayThreshold) {
+      result = "good";
+    }
+
+    // Reduced skill check bonus 2x
+    if (result === "perfect") {
+      machine.ichor += 11;    // was 22
+    } else if (result === "good") {
+      machine.ichor += 6.5;   // was 13
+    } else {
+      machine.ichor -= 10;
+      playAlarm(); // alarm on miss
+    }
+
+    if (machine.ichor < 0) machine.ichor = 0;
+    if (machine.ichor > machine.maxIchor) machine.ichor = machine.maxIchor;
+
+    skillCheck.resolved = true;
+    skillCheckActive = false;
+    timeToNextSkillCheck = randomRange(3.0, 6.5);
+  }
+
+  function update(dt) {
+    if (gameState !== "playing") return;
+
+    // Normal ichor filling (only when no active skill check)
+    if (!skillCheckActive && isFilling) {
+      machine.ichor += machine.baseFillRate * dt;
+      if (machine.ichor > machine.maxIchor) {
+        machine.ichor = machine.maxIchor;
+      }
+    }
+
+    // Schedule skill checks only if not active, not full, and progress > 10%
+    if (
+      !skillCheckActive &&
+      machine.ichor < machine.maxIchor &&
+      machine.ichor >= machine.maxIchor * 0.1
+    ) {
+      timeToNextSkillCheck -= dt;
+      if (timeToNextSkillCheck <= 0) {
+        startSkillCheck();
+      }
+    }
+
+    // Animate skill check marker
+    if (skillCheckActive) {
+      const movement = skillCheck.markerSpeed * dt * 2; // 2 for back-and-forth
+      skillCheck.markerPos += movement * skillCheck.direction;
+
+      if (skillCheck.markerPos >= 1) {
+        skillCheck.markerPos = 1;
+        skillCheck.direction = -1;
+      } else if (skillCheck.markerPos <= 0) {
+        skillCheck.markerPos = 0;
+        skillCheck.direction = 1;
+      }
+    }
+
+    // Check win if filled
+    if (machine.ichor >= machine.maxIchor) {
+      machine.ichor = machine.maxIchor;
+      if (!winSoundPlayed) {
+        playWin();
+        winSoundPlayed = true;
+      }
+      gameState = "win";
+      skillCheckActive = false;
+      restartBtn.style.display = "inline-block";
+      stopFillSound();
+    }
+  }
+
+  function startSkillCheck() {
+    // Extra safety: only show if >10% progress
+    if (machine.ichor < machine.maxIchor * 0.1) return;
+
+    skillCheckActive = true;
+    skillCheck.resolved = false;
+    // Start marker at random side
+    skillCheck.markerPos = Math.random() < 0.5 ? 0 : 1;
+    skillCheck.direction = skillCheck.markerPos === 0 ? 1 : -1;
+    playPopup();
+  }
+
+  // --- Drawing ---
+
+  function drawBackground() {
+    const grad = ctx.createRadialGradient(
+      canvas.width / 2, canvas.height / 2, 60,
+      canvas.width / 2, canvas.height / 2, 360
+    );
+    grad.addColorStop(0, "#25163f");  // purple center
+    grad.addColorStop(0.6, "#0a1a30"); // deep blue
+    grad.addColorStop(1, "#05050c");  // dark edge
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Soft pixel-ish vertical stripes
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = "#2e2348";
+    for (let x = 0; x < canvas.width; x += 16) {
+      ctx.fillRect(x, 0, 2, canvas.height);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawVerticalProgress() {
+    const pct = machine.ichor / machine.maxIchor;
+
+    // 2x wider vertical bar
+    const barWidth = 160;
+    const barHeight = canvas.height - 140;
+    const x = (canvas.width - barWidth) / 2;
+    const y = (canvas.height - barHeight) / 2;
+
+    // Glass background
+    const glassGrad = ctx.createLinearGradient(0, y, 0, y + barHeight);
+    glassGrad.addColorStop(0, "#f6fbff");
+    glassGrad.addColorStop(0.4, "#c9e6ff");
+    glassGrad.addColorStop(1, "#8fd0ff");
+
+    ctx.fillStyle = glassGrad;
+    ctx.fillRect(x, y, barWidth, barHeight);
+
+    // Inner black fill from bottom based on percentage
+    const innerPadding = 6;
+    const innerX = x + innerPadding;
+    const innerY = y + innerPadding;
+    const innerW = barWidth - innerPadding * 2;
+    const innerH = barHeight - innerPadding * 2;
+
+    const fillHeight = innerH * pct;
+
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(innerX, innerY + innerH - fillHeight, innerW, fillHeight);
+
+    // Neon border
+    ctx.strokeStyle = "#4ef9ff";
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, barWidth, barHeight);
+
+    // BIG status circle above bar: red -> green when complete
+    const cx = x + barWidth / 2;
+    const cy = y - 18;
+    const full = machine.ichor >= machine.maxIchor;
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, 50, 0, Math.PI * 2); // 5x bigger (was radius 10)
+    ctx.fillStyle = full ? "#7bffb2" : "#ff4b6b";
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = full ? "#00ff99" : "#9b1230";
+    ctx.stroke();
+  }
+
+  function drawSkillCheck() {
+    if (!skillCheckActive) return;
+
+    const barWidth = skillCheck.width;
+    const barHeight = skillCheck.height;
+    const x = (canvas.width - barWidth) / 2;
+    const y = canvas.height - 110;
+
+    // Bar background
+    ctx.fillStyle = "#151428";
+    ctx.fillRect(x, y, barWidth, barHeight);
+
+    // Inner track (purple-ish)
+    ctx.fillStyle = "#322b63";
+    ctx.fillRect(x + 2, y + 2, barWidth - 4, barHeight - 4);
+
+    // Green zone
+    const zoneX = x + 2 + (barWidth - 4) * skillCheck.zoneStart;
+    const zoneW = (barWidth - 4) * skillCheck.zoneWidth;
+    ctx.fillStyle = "#7bffb2";
+    ctx.fillRect(zoneX, y + 2, zoneW, barHeight - 4);
+
+    // Marker (triangle)
+    const markerX = x + 2 + (barWidth - 4) * skillCheck.markerPos;
+    ctx.beginPath();
+    ctx.moveTo(markerX, y - 5);
+    ctx.lineTo(markerX - 5, y + barHeight + 4);
+    ctx.lineTo(markerX + 5, y + barHeight + 4);
+    ctx.closePath();
+    ctx.fillStyle = "#ffe66b";
+    ctx.shadowColor = "#ffe66b";
+    ctx.shadowBlur = 10;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  function loop(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    const dt = (timestamp - lastTime) / 1000;
+    lastTime = timestamp;
+
+    update(dt);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawBackground();
+    drawVerticalProgress();
+    drawSkillCheck();
+
+    requestAnimationFrame(loop);
+  }
+
+  resetGame();
+  requestAnimationFrame(loop);
+</script>
+</body>
+</html>
